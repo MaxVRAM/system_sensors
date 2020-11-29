@@ -73,7 +73,6 @@ class Job(threading.Thread):
         while not self.stopped.wait(self.interval.total_seconds()):
             self.execute(*self.args, **self.kwargs)
 
-
 def write_log_message_to_console(message):
     print(datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ") + message)
     sys.stdout.flush()
@@ -105,7 +104,6 @@ def on_message(client, userdata, message):
     print (f"Message received: {message.payload.decode()}"  )
     if(message.payload.decode() == "online"):
         send_config_message(client)
-
 
 def updateSensors():
     payload_str = (
@@ -141,7 +139,6 @@ def updateSensors():
     )
     write_log_message_to_console("Payload published")
 
-
 def get_updates():
     cache = apt.Cache()
     cache.open(None)
@@ -161,18 +158,14 @@ def get_temp():
 def get_disk_usage(path):
     return str(psutil.disk_usage(path).percent)
 
-
 def get_memory_usage():
     return str(psutil.virtual_memory().percent)
-
 
 def get_cpu_usage():
     return str(psutil.cpu_percent(interval=None))
 
-
 def get_swap_usage():
     return str(psutil.swap_memory().percent)
-
 
 def get_wifi_strength():  # check_output(["/proc/net/wireless", "grep wlan0"])
     wifi_strength_value = check_output(
@@ -185,7 +178,6 @@ def get_wifi_strength():  # check_output(["/proc/net/wireless", "grep wlan0"])
     if not wifi_strength_value:
         wifi_strength_value = "0"
     return (wifi_strength_value)
-
 
 def get_rpi_power_status():
     return _underVoltage.get()
@@ -270,20 +262,6 @@ def check_settings(settings):
     if "power_integer_state" in settings:
         write_log_message_to_console("Warning: Power_integer_state is deprecated please remove this option power state is now a binary_sensor!")
 
-
-payload_list = [['temperature', 'Temperature', 'sensor', '°C', 'mdi:thermometer'],
-                ['disk_use', 'Disk Use', 'sensor', '%', 'mdi:micro-sd'],
-                ['memory_use', 'Memory Use', 'sensor', '%', 'mdi:memory'],
-                ['cpu_use', 'CPU Use', 'sensor', '%', 'mdi:memory'],
-                ['disk_use', 'Disk Use', 'sensor', '%', 'mdi:harddisk'],
-                ['swap_usage', 'Swap Use', 'sensor', '%', 'mdi:micro-sd'],
-                ['power_status', 'Under Voltage', 'binary_sensor', '', 'mdi:power-plug'],
-                ['last_boot', 'Last Boot', 'sensor', '', 'mdi:clock'],
-                ['last_message', 'Last Message', 'sensor', '', 'mdi:clock-check'],
-                ['hostname', 'Hostname', 'sensor', '', 'mdi:card-account-details'],
-                ['host_ip', 'Host IP', 'sensor', '', 'mdi:lan'],
-                ['host_os', 'Host OS', 'sensor', '', 'mdi:linux'],
-                ['host_arch', 'Host Architecture', 'sensor', '', 'mdi:chip']]
                 
 
 def create_config_payload(sensorObject):
@@ -331,27 +309,36 @@ def send_config_message(mqttClient):
 
     write_log_message_to_console("Sending MQTT sensor config payloads to broker...")
 
-    for sensor in SENSOR_CONFIGS["sensors"]:
-        if 'toggle' not in sensor:
-            create_config_payload(sensor)
-
-#    for sensor_item in payload_list:
-#        create_config_payload(sensor_item)
+    try:
+        for sensor in SENSOR_CONFIGS["sensors"]:
+            if 'toggle' not in sensor:
+                create_config_payload(sensor)
+    except:
+        write_log_message_to_console("Failed sending sensor config")
 
     if "check_available_updates" in settings and settings["check_available_updates"]:
         # import apt
         if(apt_disabled):
             write_log_message_to_console("Import of apt failed!")
         else:
-            create_config_payload({'updates', 'Updates', 'sensor', '', 'mdi:cellphone-arrow-down'})
+            try:
+                create_config_payload(SENSOR_CONFIGS["sensors"][])
+            except:
+                write_log_message_to_console("Failed sending update config")
             
 
     if "check_wifi_strength" in settings and settings["check_wifi_strength"]:
-        create_config_payload({'wifi_strength', 'WiFi Strength', 'sensor', 'dBm', 'mdi:wifi'})
+        try:
+            create_config_payload(SENSOR_CONFIGS["sensors"]["WiFi Strength"])
+        except:
+            write_log_message_to_console("Failed sending WiFi strength config")
         
     if "external_drives" in settings:
         for drive in settings["external_drives"]:
-            create_config_payload({drive, 'Disk Use', 'sensor', '%', 'mdi:harddisk'})
+            try:
+                create_config_payload({drive, 'Disk Use', 'sensor', '%', 'mdi:harddisk'})
+            except:
+                write_log_message_to_console("Failed sending drive config")
 
     mqttClient.publish(f"system-sensors/sensor/{deviceName}/availability", "online", retain=True)
 
@@ -408,7 +395,6 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-
     # INITIALISE MQTT BROKER CONNECTION
     try:
         if "port" in settings["mqtt"]:
@@ -419,7 +405,6 @@ if __name__ == "__main__":
         write_log_message_to_console("Error! Could not connect to broker. Please check config...")
         exit() 
 
-
     # CLEAR UP OLD TOPICS AND SEND CONFIG PAYLOADS FOR EACH SENSOR
     try:
         remove_old_topics()
@@ -428,7 +413,6 @@ if __name__ == "__main__":
         write_log_message_to_console("Warning, something whent wrong when attempting to send config to broker")
     _underVoltage = new_under_voltage()
 
-    
     # SETUP AND START MQTT PAYLOAD JOB
     job = Job(interval=timedelta(seconds=WAIT_TIME_SECONDS), execute=updateSensors)
     job.start()
