@@ -8,6 +8,7 @@ import platform
 import threading
 import time
 from datetime import timedelta
+from datetime import datetime
 from re import findall
 from subprocess import check_output
 from rpi_bad_power import new_under_voltage
@@ -15,6 +16,7 @@ import paho.mqtt.client as mqtt
 import psutil
 import pytz
 import yaml
+import json
 import csv
 from pytz import timezone
 
@@ -25,6 +27,10 @@ except ImportError:
     apt_disabled = True
 UTC = pytz.utc
 DEFAULT_TIME_ZONE = None
+
+DOCKER = {}
+with open("/proc/1/cgroup", "rt") as dock:
+    DOCKER = 'docker' in dock.read()
 
 # Get OS information
 OS_DATA = {}
@@ -39,13 +45,15 @@ WAIT_TIME_SECONDS = 60
 deviceName = None
 _underVoltage = None
 
+SENSOR_CONFIGS = {}
+with open('sensor_configs.json') as json_file:
+    SENSOR_CONFIGS = json.load(json_file)
+
 class ProgramKilled(Exception):
     pass
 
-
 def signal_handler(signum, frame):
     raise ProgramKilled
-
 
 class Job(threading.Thread):
     def __init__(self, interval, execute, *args, **kwargs):
@@ -66,15 +74,17 @@ class Job(threading.Thread):
             self.execute(*self.args, **self.kwargs)
 
 
+def write_log_message_to_console(message):
+    print(datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ") + message)
+    sys.stdout.flush()
+
 def write_message_to_console(message):
     print(message)
     sys.stdout.flush()
-    
 
 def utc_from_timestamp(timestamp: float) -> dt.datetime:
     """Return a UTC time from a timestamp."""
     return UTC.localize(dt.datetime.utcfromtimestamp(timestamp))
-
 
 def as_local(dattim: dt.datetime) -> dt.datetime:
     """Convert a UTC datetime object to local time zone."""
@@ -90,7 +100,6 @@ def get_last_boot():
 
 def get_last_message():
     return str(as_local(utc_from_timestamp(time.time())).isoformat())
-
 
 def on_message(client, userdata, message):
     print (f"Message received: {message.payload.decode()}"  )
@@ -130,6 +139,7 @@ def updateSensors():
         qos=1,
         retain=False,
     )
+    write_log_message_to_console("Payload published")
 
 
 def get_updates():
@@ -138,10 +148,8 @@ def get_updates():
     cache.upgrade()
     return str(cache.get_changes().__len__())
 
-
-# Temperature method depending on system distro
 def get_temp():
-    temp = "";
+    temp = ""
     if "rasp" in OS_DATA["ID"]:
         reading = check_output(["vcgencmd", "measure_temp"]).decode("UTF-8")
         temp = str(findall("\d+\.\d+", reading)[0])
@@ -211,72 +219,23 @@ def get_host_arch():
         return "Unknown"
 
 def remove_old_topics():
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}Temp/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}DiskUse/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}MemoryUse/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}CpuUsage/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}SwapUsage/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/binary_sensor/{deviceNameDisplay}/{deviceNameDisplay}PowerStatus/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}PowerStatus/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}LastBoot/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}LastMessage/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}WifiStrength/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}Updates/config",
-        payload='',
-        qos=1,
-        retain=False,
-    )
+    for sensor in SENSOR_CONFIGS["oldSensors"]:
+        mqttClient.publish(
+            topic=f"homeassistant/sensor/{deviceNameDisplay}/{deviceNameDisplay}{sensor}/config",
+            payload='',
+            qos=1,
+            retain=False,
+        )
+        write_log_message_to_console(f"Deleted legacy entry: {sensor}")
+
+    for sensor in SENSOR_CONFIGS["oldBinary"]:
+        mqttClient.publish(
+            topic=f"homeassistant/binary_sensor/{deviceNameDisplay}/{deviceNameDisplay}{sensor}/config",
+            payload='',
+            qos=1,
+            retain=False,
+        )
+        write_log_message_to_console(f"Deleted legacy entry: {sensor}")
 
     if "external_drives" in settings:
         for drive in settings["external_drives"]:
@@ -286,259 +245,113 @@ def remove_old_topics():
                 qos=1,
                 retain=False,
             )
+        write_log_message_to_console(f"Deleted legacy entry: {drive}")
+
+    write_log_message_to_console(" ")
+    write_log_message_to_console(" ")
 
 
 def check_settings(settings):
     if "mqtt" not in settings:
-        write_message_to_console("Mqtt not defined in settings.yaml! Please check the documentation")
+        write_log_message_to_console("Warning: MQTT not defined in settings.yaml! Please check the documentation")
         sys.exit()
     if "hostname" not in settings["mqtt"]:
-        write_message_to_console("Hostname not defined in settings.yaml! Please check the documentation")
+        write_log_message_to_console("Warning: Hostname not defined in settings.yaml! Please check the documentation")
         sys.exit()
     if "timezone" not in settings:
-        write_message_to_console("Timezone not defined in settings.yaml! Please check the documentation")
+        write_log_message_to_console("Warning: Timezone not defined in settings.yaml! Please check the documentation")
         sys.exit()
     if "deviceName" not in settings:
-        write_message_to_console("deviceName not defined in settings.yaml! Please check the documentation")
+        write_log_message_to_console("Warning: DeviceName not defined in settings.yaml! Please check the documentation")
         sys.exit()
     if "client_id" not in settings:
-        write_message_to_console("client_id not defined in settings.yaml! Please check the documentation")
+        write_log_message_to_console("Warning: Client_id not defined in settings.yaml! Please check the documentation")
         sys.exit()
     if "power_integer_state" in settings:
-        write_message_to_console("power_integer_state is deprecated please remove this option power state is now a binary_sensor!")
+        write_log_message_to_console("Warning: Power_integer_state is deprecated please remove this option power state is now a binary_sensor!")
+
+
+payload_list = [['temperature', 'Temperature', 'sensor', '°C', 'mdi:thermometer'],
+                ['disk_use', 'Disk Use', 'sensor', '%', 'mdi:micro-sd'],
+                ['memory_use', 'Memory Use', 'sensor', '%', 'mdi:memory'],
+                ['cpu_use', 'CPU Use', 'sensor', '%', 'mdi:memory'],
+                ['disk_use', 'Disk Use', 'sensor', '%', 'mdi:harddisk'],
+                ['swap_usage', 'Swap Use', 'sensor', '%', 'mdi:micro-sd'],
+                ['power_status', 'Under Voltage', 'binary_sensor', '', 'mdi:power-plug'],
+                ['last_boot', 'Last Boot', 'sensor', '', 'mdi:clock'],
+                ['last_message', 'Last Message', 'sensor', '', 'mdi:clock-check'],
+                ['hostname', 'Hostname', 'sensor', '', 'mdi:card-account-details'],
+                ['host_ip', 'Host IP', 'sensor', '', 'mdi:lan'],
+                ['host_os', 'Host OS', 'sensor', '', 'mdi:linux'],
+                ['host_arch', 'Host Architecture', 'sensor', '', 'mdi:chip']]
+                
+
+def create_config_payload(sensorObject):
+    try:
+        if "unit" in sensorObject:
+            mqttClient.publish(
+                topic=f"homeassistant/{sensorObject['type']}/{deviceName}/{sensorObject['name_sys']}/config",
+                payload="{"
+                        + f"\"device_class\":\"{sensorObject['name_sys']}\","
+                        + f"\"name\":\"{deviceNameDisplay} {sensorObject['name']}\","
+                        + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
+                        + f"\"unit_of_measurement\":\"{sensorObject['unit']}\","
+                        + f"\"value_template\":\"{{{{value_json.{sensorObject['name_sys']}}}}}\","
+                        + f"\"unique_id\":\"{deviceName}_sensor_{sensorObject['name_sys']}\","
+                        + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
+                        + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
+                        + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
+                        + f"\"icon\":\"{sensorObject['icon']}\"}}",
+                qos=1,
+                retain=True,
+            )
+        else:
+            mqttClient.publish(
+                topic=f"homeassistant/{sensorObject['type']}/{deviceName}/{sensorObject['name_sys']}/config",
+                payload="{"
+                        + f"\"device_class\":\"{sensorObject['name_sys']}\","
+                        + f"\"name\":\"{deviceNameDisplay} {sensorObject['name']}\","
+                        + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
+                        + f"\"value_template\":\"{{{{value_json.{sensorObject['name_sys']}}}}}\","
+                        + f"\"unique_id\":\"{deviceName}_sensor_{sensorObject['name_sys']}\","
+                        + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
+                        + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
+                        + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
+                        + f"\"icon\":\"{sensorObject['icon']}\"}}",
+                qos=1,
+                retain=True,
+            )
+
+        write_log_message_to_console(f"Success sending \'{sensorObject['name']}\' config to broker")
+    except:
+        write_log_message_to_console(f"Error sending \'{sensorObject['name']}\' config to broker")
 
 
 def send_config_message(mqttClient):
-    write_message_to_console("send config message")
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/temperature/config",
-        payload='{"device_class":"temperature",'
-                + f"\"name\":\"{deviceNameDisplay} Temperature\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"unit_of_measurement":"°C",'
-                + '"value_template":"{{value_json.temperature}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_temperature\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:thermometer\"}}",
-        qos=1,
-        retain=True,
-    )
-    
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/disk_use/config",
-        payload=f"{{\"name\":\"{deviceNameDisplay} Disk Use\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"unit_of_measurement":"%",'
-                + '"value_template":"{{value_json.disk_use}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_disk_use\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:micro-sd\"}}",
-        qos=1,
-        retain=True,
-    )
-    
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/memory_use/config",
-        payload=f"{{\"name\":\"{deviceNameDisplay} Memory Use\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"unit_of_measurement":"%",'
-                + '"value_template":"{{value_json.memory_use}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_memory_use\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:memory\"}}",
-        qos=1,
-        retain=True,
-    )
-    
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/cpu_usage/config",
-        payload=f"{{\"name\":\"{deviceNameDisplay} Cpu Usage\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"unit_of_measurement":"%",'
-                + '"value_template":"{{value_json.cpu_usage}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_cpu_usage\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:memory\"}}",
-        qos=1,
-        retain=True,
-    )
-    
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/swap_usage/config",
-        payload=f"{{\"name\":\"{deviceNameDisplay} Swap Usage\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"unit_of_measurement":"%",'
-                + '"value_template":"{{value_json.swap_usage}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_swap_usage\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:harddisk\"}}",
-        qos=1,
-        retain=True,
-    )
-    
-    mqttClient.publish(
-        topic=f"homeassistant/binary_sensor/{deviceName}/power_status/config",
-        payload='{"device_class":"problem",'
-                + f"\"name\":\"{deviceNameDisplay} Under Voltage\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"value_template":"{{value_json.power_status}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_power_status\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}}"
-                + f"}}",
-        qos=1,
-        retain=True,
-    )
-    
-   
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/last_boot/config",
-        payload='{"device_class":"timestamp",'
-                + f"\"name\":\"{deviceNameDisplay} Last Boot\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"value_template":"{{value_json.last_boot}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_last_boot\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:clock\"}}",
-        qos=1,
-        retain=True,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/hostname/config",
-        payload=f"{{\"name\":\"{deviceNameDisplay} Hostname\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"value_template":"{{value_json.host_name}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_host_name\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:card-account-details\"}}",
-        qos=1,
-        retain=True,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/host_ip/config",
-        payload=f"{{\"name\":\"{deviceNameDisplay} Host Ip\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"value_template":"{{value_json.host_ip}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_host_ip\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:lan\"}}",
-        qos=1,
-        retain=True,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/host_os/config",
-        payload=f"{{\"name\":\"{deviceNameDisplay} Host OS\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"value_template":"{{value_json.host_os}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_host_os\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:linux\"}}",
-        qos=1,
-        retain=True,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/host_arch/config",
-        payload=f"{{\"name\":\"{deviceNameDisplay} Host Architecture\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"value_template":"{{value_json.host_arch}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_host_arch\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:chip\"}}",
-        qos=1,
-        retain=True,
-    )
-    mqttClient.publish(
-        topic=f"homeassistant/sensor/{deviceName}/last_message/config",
-        payload='{"device_class":"timestamp",'
-                + f"\"name\":\"{deviceNameDisplay} Last Message\","
-                + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                + '"value_template":"{{value_json.last_message}}",'
-                + f"\"unique_id\":\"{deviceName}_sensor_last_message\","
-                + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                + f"\"icon\":\"mdi:clock-check\"}}",
-        qos=1,
-        retain=True,
-    )
 
+    write_log_message_to_console("Sending MQTT sensor config payloads to broker...")
 
+    for sensor in SENSOR_CONFIGS["sensors"]:
+        if 'toggle' not in sensor:
+            create_config_payload(sensor)
+
+#    for sensor_item in payload_list:
+#        create_config_payload(sensor_item)
 
     if "check_available_updates" in settings and settings["check_available_updates"]:
         # import apt
         if(apt_disabled):
-            write_message_to_console("import of apt failed!")
+            write_log_message_to_console("Import of apt failed!")
         else:
-            mqttClient.publish(
-                topic=f"homeassistant/sensor/{deviceName}/updates/config",
-                payload=f"{{\"name\":\"{deviceNameDisplay} Updates\","
-                        + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                        + '"value_template":"{{value_json.updates}}",'
-                        + f"\"unique_id\":\"{deviceName}_sensor_updates\","
-                        + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                        + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                        + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                        + f"\"icon\":\"mdi:cellphone-arrow-down\"}}",
-                qos=1,
-                retain=True,
-            )
+            create_config_payload({'updates', 'Updates', 'sensor', '', 'mdi:cellphone-arrow-down'})
             
 
     if "check_wifi_strength" in settings and settings["check_wifi_strength"]:
-        mqttClient.publish(
-            topic=f"homeassistant/sensor/{deviceName}/wifi_strength/config",
-            payload='{"device_class":"signal_strength",'
-                    + f"\"name\":\"{deviceNameDisplay} Wifi Strength\","
-                    + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                    + '"unit_of_measurement":"dBm",'
-                    + '"value_template":"{{value_json.wifi_strength}}",'
-                    + f"\"unique_id\":\"{deviceName}_sensor_wifi_strength\","
-                    + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                    + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                    + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                    + f"\"icon\":\"mdi:wifi\"}}",
-            qos=1,
-            retain=True,
-        )
+        create_config_payload({'wifi_strength', 'WiFi Strength', 'sensor', 'dBm', 'mdi:wifi'})
         
     if "external_drives" in settings:
         for drive in settings["external_drives"]:
-            mqttClient.publish(
-                topic=f"homeassistant/sensor/{deviceName}/disk_use_{drive}/config",
-                payload=f"{{\"name\":\"{deviceNameDisplay} Disk Use {drive}\","
-                        + f"\"state_topic\":\"system-sensors/sensor/{deviceName}/state\","
-                        + '"unit_of_measurement":"%",'
-                        + f"\"value_template\":\"{{{{value_json.disk_use_{drive}}}}}\","
-                        + f"\"unique_id\":\"{deviceName}_sensor_disk_use_{drive}\","
-                        + f"\"availability_topic\":\"system-sensors/sensor/{deviceName}/availability\","
-                        + f"\"device\":{{\"identifiers\":[\"{deviceName}_sensor\"],"
-                        + f"\"name\":\"{deviceNameDisplay} Sensors\",\"model\":\"RPI {deviceNameDisplay}\", \"manufacturer\":\"RPI\"}},"
-                        + f"\"icon\":\"mdi:harddisk\"}}",
-                qos=1,
-                retain=True,
-            )
-            
+            create_config_payload({drive, 'Disk Use', 'sensor', '%', 'mdi:harddisk'})
 
     mqttClient.publish(f"system-sensors/sensor/{deviceName}/availability", "online", retain=True)
 
@@ -552,11 +365,25 @@ def _parser():
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
-        write_message_to_console("Connected to broker")
+        write_log_message_to_console("Connected to broker")
         client.subscribe("hass/status")
         mqttClient.publish(f"system-sensors/sensor/{deviceName}/availability", "online", retain=True)
     else:
-        write_message_to_console("Connection failed")
+        write_log_message_to_console("ERROR: Connection failed!")
+
+
+write_message_to_console(" ")
+write_message_to_console("------------------------------------------------------------------------")
+write_message_to_console(" ")
+write_message_to_console(".---..-..-..---..---..---..-.-.-. .---..---..-..-..---..----..---. .---.")
+write_message_to_console(" \ \  >  /  \ \ `| |'| |- | | | |  \ \ | |- | .` | \ \ | || || |-<  \ \ ")
+write_message_to_console("`---' `-'  `---' `-' `---'`-'-'-' `---'`---'`-'`-'`---'`----'`-'`-'`---'")
+write_message_to_console(" ")
+write_message_to_console("    System Sensors || https://github.com/Sennevds/system_sensors.git    ")
+write_message_to_console(" ")
+write_message_to_console("------------------------------------------------------------------------")
+write_message_to_console(" ")
+write_message_to_console(" ")
 
 
 if __name__ == "__main__":
@@ -580,16 +407,29 @@ if __name__ == "__main__":
         )  # Username and pass if configured otherwise you should comment out this
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
-    if "port" in settings["mqtt"]:
-        mqttClient.connect(settings["mqtt"]["hostname"], settings["mqtt"]["port"])
-    else:
-        mqttClient.connect(settings["mqtt"]["hostname"], 1883)
+
+
+    # INITIALISE MQTT BROKER CONNECTION
+    try:
+        if "port" in settings["mqtt"]:
+            mqttClient.connect(settings["mqtt"]["hostname"], settings["mqtt"]["port"])
+        else:
+            mqttClient.connect(settings["mqtt"]["hostname"], 1883)
+    except:
+        write_log_message_to_console("Error! Could not connect to broker. Please check config...")
+        exit() 
+
+
+    # CLEAR UP OLD TOPICS AND SEND CONFIG PAYLOADS FOR EACH SENSOR
     try:
         remove_old_topics()
         send_config_message(mqttClient)
     except:
-        write_message_to_console("something whent wrong")
+        write_log_message_to_console("Warning, something whent wrong when attempting to send config to broker")
     _underVoltage = new_under_voltage()
+
+    
+    # SETUP AND START MQTT PAYLOAD JOB
     job = Job(interval=timedelta(seconds=WAIT_TIME_SECONDS), execute=updateSensors)
     job.start()
 
@@ -600,10 +440,15 @@ if __name__ == "__main__":
             sys.stdout.flush()
             time.sleep(1)
         except ProgramKilled:
-            write_message_to_console("Program killed: running cleanup code")
+            write_message_to_console(" ")
+            write_message_to_console(" ")
+            write_log_message_to_console("Program killed! Running cleanup code")
+            write_message_to_console(" ")
             mqttClient.publish(f"system-sensors/sensor/{deviceName}/availability", "offline", retain=True)
             mqttClient.disconnect()
             mqttClient.loop_stop()
             sys.stdout.flush()
             job.stop()
+            write_message_to_console(" ")
+            write_message_to_console(" ")
             break
